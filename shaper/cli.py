@@ -853,6 +853,13 @@ def _do_setup():
         if val:
             updates['ANYMAIL_API_KEY'] = val
 
+        val = _prompt_key(
+            'SSM_API_KEY', 'SSM API Key',
+            'Sales System Mastery enrichment (members only)  ·  skool.com/ssmasters'
+        )
+        if val:
+            updates['SSM_API_KEY'] = val
+
         console.print("\n  [bold]Email Sending[/bold]  [dim](optional — skip if not sending campaigns)[/dim]")
         sending_provider = Prompt.ask(
             "  Sending platform",

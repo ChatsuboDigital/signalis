@@ -107,9 +107,9 @@ def ask_for_enrichment():
     # Check if API keys are configured
     has_apollo = bool(os.getenv('APOLLO_API_KEY'))
     has_anymail = bool(os.getenv('ANYMAIL_API_KEY'))
-    has_connector = bool(os.getenv('CONNECTOR_AGENT_API_KEY'))
+    has_ssm = bool(os.getenv('SSM_API_KEY'))
 
-    if not any([has_apollo, has_anymail, has_connector]):
+    if not any([has_apollo, has_anymail, has_ssm]):
         show_warning("No enrichment API keys found in .env file")
         show_info("You can still run matching without enrichment")
         enable = Confirm.ask("[yellow]Skip enrichment?[/yellow]", default=True)
@@ -119,9 +119,9 @@ def ask_for_enrichment():
         if has_apollo:
             providers.append("Apollo")
         if has_anymail:
-            providers.append("Anymail")
-        if has_connector:
-            providers.append("Connector Agent")
+            providers.append("Anymail Finder")
+        if has_ssm:
+            providers.append("SSM")
 
         show_success(f"Found API keys for: {', '.join(providers)}")
         enable = Confirm.ask("[cyan]Enable email enrichment?[/cyan]", default=True)
