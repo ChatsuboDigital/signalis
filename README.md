@@ -118,7 +118,7 @@ Where supply meets demand. Takes two shaped CSVs and runs a pipeline that scores
       │
       ├─ 1. Normalize        Standardise both datasets
       ├─ 2. Match            Score every supply–demand pair
-      ├─ 3. Enrich           Find missing emails (Apollo → Anymail cascade)
+      ├─ 3. Enrich           Find missing emails (Apollo → Anymail → SSM cascade)
       ├─ 4. AI Intros        Generate personalised intros per match
       ├─ 5. Send             Push to Instantly.ai or Plusvibe (optional)
       └─ 6. Export           Matched CSV with intros written to output/
@@ -136,9 +136,9 @@ The matching engine scores pairs using weighted factors — industry alignment, 
 
 ### Enrichment
 
-Missing emails are resolved through a cascading system — cache first, then SSM, then Apollo, then Anymail Finder as fallback. Successful results are cached locally for 90 days, so re-runs on similar data cost zero API calls.
+Missing emails are resolved through a cascading system — cache first, then Apollo, then Anymail Finder, then SSM as final fallback. Successful results are cached locally for 90 days, so re-runs on similar data cost zero API calls.
 
-> **SSM members** get access to the SSM enrichment provider — the fastest path in the cascade. [Join the SSM Skool group](https://www.skool.com/ssm) to get your API key.
+> **SSM (Sales System Mastery)** is a Skool community built around modern outreach and sales systems — and the community that inspired this tool. Members get access to the SSM enrichment provider as a final-stage fallback in the cascade. [Join SSM on Skool](https://www.skool.com/ssmasters) to get your API key.
 
 ```bash
 signalis connect cache          # View cache stats
@@ -185,14 +185,14 @@ The core pipeline works with zero API keys. Services layer on intelligence when 
 |---------|-------------|---------|
 | **Exa** | Domain resolution, AI signal generation, company context | Shaper |
 | **OpenAI / Anthropic** | Signal synthesis, intro generation | Both |
-| **SSM** ⬡ | Email enrichment — first in cascade (SSM members only) | Connector |
 | **Apollo** | Email enrichment | Connector |
 | **Anymail Finder** | Email enrichment fallback | Connector |
+| **SSM** ⬡ | Email enrichment — final fallback (Sales System Mastery members) | Connector |
 | **Instantly.ai** | Campaign sending | Connector |
 | **Plusvibe** | Campaign sending (alternative) | Connector |
 | **Apify** | Dataset loading | Shaper |
 
-⬡ SSM enrichment is available to SSM community members. [Join the Skool group](https://www.skool.com/ssm) to get your API key.
+⬡ **SSM (Sales System Mastery)** is a Skool community for outreach and sales teams — and the community that inspired this tool. Members get access to the SSM enrichment provider. [Join SSM on Skool](https://www.skool.com/ssmasters) to get your API key.
 
 Configure keys interactively with `signalis setup` or edit `.env` by hand. Run `signalis config` to see what's active.
 
@@ -214,9 +214,9 @@ AI_PROVIDER=openai            # openai or anthropic
 OPENAI_API_KEY=               # Required if AI_PROVIDER=openai
 
 # ── Connector — Email Enrichment ─────────────────────────────
-SSM_API_KEY=                  # SSM members only — skool.com/ssm
 APOLLO_API_KEY=               # Email enrichment
 ANYMAIL_API_KEY=              # Email enrichment fallback
+SSM_API_KEY=                  # SSM members only — skool.com/ssmasters
 
 # ── Connector — Campaign Sending (optional) ───────────────────
 SENDING_PROVIDER=instantly    # instantly or plusvibe

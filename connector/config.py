@@ -29,10 +29,9 @@ class ConnectorConfig:
     """Main configuration for Connector CLI"""
 
     # Enrichment API Keys
-    ssm_api_key: Optional[str] = None
     apollo_api_key: Optional[str] = None
     anymail_api_key: Optional[str] = None
-    connector_agent_api_key: Optional[str] = None
+    ssm_api_key: Optional[str] = None
 
     # AI Configuration
     ai_provider: Literal['openai', 'anthropic', 'azure'] = 'openai'
@@ -66,10 +65,9 @@ class ConnectorConfig:
         """Load configuration from environment variables"""
         return cls(
             # Enrichment
-            ssm_api_key=os.getenv('SSM_API_KEY'),
             apollo_api_key=os.getenv('APOLLO_API_KEY'),
             anymail_api_key=os.getenv('ANYMAIL_API_KEY'),
-            connector_agent_api_key=os.getenv('CONNECTOR_AGENT_API_KEY'),
+            ssm_api_key=os.getenv('SSM_API_KEY'),
 
             # AI
             ai_provider=os.getenv('AI_PROVIDER', 'openai'),  # type: ignore

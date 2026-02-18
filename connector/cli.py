@@ -301,10 +301,9 @@ def run(demand, supply, output_dir, min_score, best_match_only, enrich, ai_intro
         show_step(3, "Email Enrichment", "Finding missing contact emails...")
 
         enrichment_config = EnrichmentConfig(
-            ssm_api_key=config.ssm_api_key,
             apollo_api_key=config.apollo_api_key,
             anymail_api_key=config.anymail_api_key,
-            connector_agent_api_key=config.connector_agent_api_key,
+            ssm_api_key=config.ssm_api_key,
         )
 
         # Collect all unique records that need enrichment
