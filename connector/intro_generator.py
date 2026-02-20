@@ -8,7 +8,7 @@ Variable-fill template generation for email introductions.
 import re
 import json
 from typing import Dict, Any, Optional, Literal
-from concurrent.futures import ThreadPoolExecutor, as_completed
+from concurrent.futures import ThreadPoolExecutor
 
 # Optional AI provider imports
 try:

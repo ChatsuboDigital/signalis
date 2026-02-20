@@ -37,7 +37,7 @@ def show_banner():
     console.print(panel)
 
 
-def show_step(step: int, title: str, description: str = ""):
+def show_step(step, title: str, description: str = ""):
     """Show a step header"""
     console.print()
     header = f"[bold cyan]Step {step}: {title}[/bold cyan]"

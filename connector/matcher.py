@@ -789,6 +789,7 @@ def filter_by_score(result: MatchingResult, min_score: float) -> MatchingResult:
     # Recalculate stats for filtered matches
     filtered_scores = [m.score for m in filtered_demand]
     avg_score = round(sum(filtered_scores) / len(filtered_scores)) if filtered_scores else 0
+    unique_demands = len({m.demand.domain or m.demand.company_name for m in filtered_demand})
 
     return MatchingResult(
         demand_matches=filtered_demand,
@@ -796,7 +797,8 @@ def filter_by_score(result: MatchingResult, min_score: float) -> MatchingResult:
         stats={
             'total_demand': result.stats['total_demand'],
             'total_supply': result.stats['total_supply'],
-            'total_matches': len(filtered_demand),  # Count FILTERED matches
+            'total_matches': len(filtered_demand),
+            'unique_demands_matched': unique_demands,
             'avg_score': avg_score,
         },
     )

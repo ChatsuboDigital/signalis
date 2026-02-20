@@ -10,7 +10,7 @@ Changes require code review + deploy.
 """
 
 import re
-from typing import Set, List, Dict, Literal, Optional, Tuple
+from typing import Any, Set, List, Dict, Literal, Optional, Tuple
 from dataclasses import dataclass
 
 
@@ -307,7 +307,7 @@ def extract_tokens(text: str) -> List[str]:
 def compute_semantic_overlap(
     demand_tokens: Set[str],
     supply_tokens: Set[str]
-) -> Dict[str, any]:
+) -> Dict[str, Any]:
     """
     Compute semantic overlap between two token sets.
 
@@ -345,7 +345,7 @@ def calculate_semantic_bonus(overlap_count: int) -> int:
         return 0
 
 
-def get_semantic_score(demand_text: str, supply_text: str) -> Dict[str, any]:
+def get_semantic_score(demand_text: str, supply_text: str) -> Dict[str, Any]:
     """
     Complete semantic scoring pipeline.
 

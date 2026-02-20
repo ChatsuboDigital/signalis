@@ -19,7 +19,7 @@ from rich.progress import Progress, SpinnerColumn, TextColumn, BarColumn, TaskPr
 from core import __version__
 from .config import ConnectorConfig
 from .csv_normalizer import load_and_normalize_csv
-from .matcher import match_records, filter_by_score
+from .matcher import match_records
 from .enrichment import enrich_batch, EnrichmentConfig
 from .intro_generator import generate_intros_ai, IntroAIConfig
 from .senders import (
