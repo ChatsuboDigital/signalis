@@ -47,6 +47,7 @@ class SendResult:
     lead_id: Optional[str] = None
     status: SendStatus = 'needs_attention'
     detail: Optional[str] = None
+    is_rate_limited: bool = False  # True when provider returned 429
 
 
 class SenderAdapter(Protocol):
@@ -178,6 +179,13 @@ class InstantlySender:
                 )
 
         except requests.exceptions.HTTPError as e:
+            if e.response.status_code == 429:
+                return SendResult(
+                    success=False,
+                    status='needs_attention',
+                    detail='Rate limited (429) — will retry',
+                    is_rate_limited=True
+                )
             return SendResult(
                 success=False,
                 status='needs_attention',
@@ -323,6 +331,13 @@ class PlusvibeSender:
                 )
 
         except requests.exceptions.HTTPError as e:
+            if e.response.status_code == 429:
+                return SendResult(
+                    success=False,
+                    status='needs_attention',
+                    detail='Rate limited (429) — will retry',
+                    is_rate_limited=True
+                )
             return SendResult(
                 success=False,
                 status='needs_attention',
@@ -412,6 +427,17 @@ class SimpleRateLimiter:
     def release(self):
         """Release a concurrent slot."""
         self.in_flight = max(0, self.in_flight - 1)
+
+    def drain(self):
+        """
+        Drain the token bucket to zero.
+
+        Called on 429 response — forces all subsequent requests to wait
+        for the bucket to refill before proceeding, mirroring the
+        connector-os bucket.pause() behaviour.
+        """
+        self.tokens = 0.0
+        self.last_update = time.time()
 
 
 # Limiter instances

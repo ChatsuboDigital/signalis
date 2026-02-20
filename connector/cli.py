@@ -557,33 +557,54 @@ def run(demand, supply, output_dir, min_score, best_match_only, enrich, ai_intro
                 ) as progress:
                     task = progress.add_task(f"Sending to {sender.name}...", total=len(send_queue))
 
+                    _MAX_RETRIES = 5
+                    _INITIAL_BACKOFF = 2.0  # seconds
+
                     for i, item in enumerate(send_queue):
-                        try:
-                            # Rate limit
-                            limiter.wait_for_token()
+                        retry_count = 0
+                        sent = False
 
-                            # Send
-                            params = SendLeadParams(**item)
-                            result_obj = sender.send_lead(sender_config, params)
+                        while not sent and retry_count <= _MAX_RETRIES:
+                            try:
+                                limiter.wait_for_token()
+                                params = SendLeadParams(**item)
+                                result_obj = sender.send_lead(sender_config, params)
 
-                            # Track result
-                            if result_obj.success:
-                                send_results[result_obj.status] += 1
-                                # Collect error details for needs_attention cases
-                                if result_obj.status == 'needs_attention' and result_obj.detail and len(error_details) < 3:
-                                    error_details.append(result_obj.detail)
-                            else:
+                                # 429 — drain bucket, backoff, retry
+                                if result_obj.is_rate_limited:
+                                    limiter.drain()
+                                    retry_count += 1
+                                    if retry_count > _MAX_RETRIES:
+                                        send_results['failed'] += 1
+                                        if result_obj.detail and len(error_details) < 3:
+                                            error_details.append(f"Rate limited after {_MAX_RETRIES} retries")
+                                        sent = True
+                                    else:
+                                        backoff = min(_INITIAL_BACKOFF * (2 ** (retry_count - 1)), 30.0)
+                                        time.sleep(backoff)
+                                    continue
+
+                                # Normal result
+                                if result_obj.success:
+                                    send_results[result_obj.status] += 1
+                                    if result_obj.status == 'needs_attention' and result_obj.detail and len(error_details) < 3:
+                                        error_details.append(result_obj.detail)
+                                else:
+                                    send_results['failed'] += 1
+                                    if result_obj.detail and len(error_details) < 3:
+                                        error_details.append(result_obj.detail)
+
+                                sent = True
+
+                            except Exception as e:
                                 send_results['failed'] += 1
-                                if result_obj.detail and len(error_details) < 3:
-                                    error_details.append(result_obj.detail)
+                                if len(error_details) < 3:
+                                    error_details.append(str(e))
+                                sent = True
+                            finally:
+                                limiter.release()
 
-                        except Exception as e:
-                            send_results['failed'] += 1
-                            if len(error_details) < 3:
-                                error_details.append(str(e))
-                        finally:
-                            limiter.release()
-                            progress.update(task, completed=i + 1)
+                        progress.update(task, completed=i + 1)
 
                 # Show clean summary
                 console.print()

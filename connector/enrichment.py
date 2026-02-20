@@ -3,8 +3,18 @@ Enrichment Module
 
 Python port of connector-os/src/enrichment/
 Enriches records to find missing emails and contact data.
+
+Improvements over original:
+- Email verification for pre-existing emails (SSM /verify endpoint)
+- Smart input routing: classify inputs before choosing provider
+- Apollo seniority ranking: best decision maker, not just first result
+- Parallel batch processing (ThreadPoolExecutor, max_workers=3)
+- Thread-safe cache access
 """
 
+import time
+import threading
+from concurrent.futures import ThreadPoolExecutor, as_completed
 import requests
 from typing import Dict, Any, Optional, List
 from dataclasses import dataclass
@@ -22,17 +32,202 @@ class EnrichmentConfig:
     timeout_ms: int = 30000
 
 
+# Thread-safe lock for cache reads/writes
+_cache_lock = threading.Lock()
+
+
+# =============================================================================
+# SENIORITY RANKING — Apollo candidate scoring
+# Port of connector-os seniority ranks. Higher = more senior.
+# =============================================================================
+
+SENIORITY_RANKS: Dict[str, int] = {
+    'founder': 100,
+    'co-founder': 99,
+    'owner': 98,
+    'partner': 95,
+    'principal': 94,
+    'managing director': 92,
+    'ceo': 90,
+    'cfo': 89,
+    'cto': 88,
+    'coo': 87,
+    'cmo': 86,
+    'cro': 85,
+    'president': 84,
+    'vp': 70,
+    'vice president': 70,
+    'director': 60,
+    'head': 55,
+    'manager': 40,
+    'lead': 35,
+    'senior': 30,
+}
+
+
+def _score_person(person: Dict[str, Any]) -> int:
+    """Score a candidate by title seniority. Higher = better match."""
+    title = (person.get('title') or '').lower()
+    for keyword, score in sorted(SENIORITY_RANKS.items(), key=lambda x: -x[1]):
+        if keyword in title:
+            return score
+    return 10  # default for unknown titles
+
+
+# =============================================================================
+# INPUT CLASSIFICATION — Deterministic routing before any API call
+# Port of connector-os/src/enrichment/router.ts classifyInputs()
+# =============================================================================
+
+def classify_inputs(record: NormalizedRecord) -> str:
+    """
+    Classify what enrichment action to take based on available inputs.
+
+    Returns one of:
+      VERIFY             — email present, check if it's live
+      FIND_PERSON        — domain + name, find this specific person
+      FIND_COMPANY_CONTACT — domain only, find any decision maker
+      SEARCH_PERSON      — company name + person name, no domain
+      SEARCH_COMPANY     — company name only, no domain or person
+      CANNOT_ROUTE       — insufficient inputs
+    """
+    has_email = bool(record.email)
+    has_domain = bool(record.domain)
+    has_company = bool(record.company)
+
+    # Name: full name must be 2+ words, or first + last both set
+    name_parts = (record.full_name or '').strip().split()
+    has_full_name = len(name_parts) >= 2 or (bool(record.first_name) and bool(record.last_name))
+
+    # Single name with supporting context (title or LinkedIn) still usable
+    has_name_with_context = (
+        len(name_parts) == 1 and
+        (bool(record.title) or bool(record.linkedin))
+    )
+    has_person_name = has_full_name or has_name_with_context
+
+    if has_email:
+        return 'VERIFY'
+    if has_domain and has_person_name:
+        return 'FIND_PERSON'
+    if has_domain:
+        return 'FIND_COMPANY_CONTACT'
+    if has_company and has_person_name:
+        return 'SEARCH_PERSON'
+    if has_company:
+        return 'SEARCH_COMPANY'
+    return 'CANNOT_ROUTE'
+
+
 # =============================================================================
 # PROVIDER FUNCTIONS
 # =============================================================================
 
+def verify_with_ssm(
+    email: str,
+    api_key: str,
+    timeout_ms: int = 12000
+) -> Optional[EnrichmentResult]:
+    """
+    Verify an existing email address using the ConnectorAgent verify endpoint.
+
+    Endpoint: POST https://api.connector-os.com/api/email/v2/verify
+    SSM membership required: https://www.skool.com/ssmasters
+
+    Returns:
+      outcome='VERIFIED'  — email is live (status: valid)
+      outcome='VERIFIED'  — email is risky (status: risky) — passes, flagged
+      outcome='INVALID'   — email is dead (status: invalid)
+      None                — could not determine (error / unknown)
+    """
+    if not api_key or not email:
+        return None
+
+    try:
+        response = requests.post(
+            'https://api.connector-os.com/api/email/v2/verify',
+            headers={
+                'Content-Type': 'application/json',
+                'Authorization': f'Bearer {api_key}',
+            },
+            json={'email': email},
+            timeout=timeout_ms / 1000
+        )
+
+        if response.status_code == 401:
+            return EnrichmentResult(
+                action='VERIFY',
+                outcome='AUTH_ERROR',
+                email=email,
+                source='ssm',
+                inputs_present={'email': True}
+            )
+
+        if response.status_code == 429:
+            return EnrichmentResult(
+                action='VERIFY',
+                outcome='RATE_LIMITED',
+                email=email,
+                source='ssm',
+                inputs_present={'email': True}
+            )
+
+        if response.status_code != 200:
+            return None
+
+        data = response.json()
+        status = (data.get('status') or '').lower()
+        verdict = (data.get('verdict') or '').upper()
+
+        # valid / VALID → confirmed live
+        if status == 'valid' or verdict == 'VALID':
+            return EnrichmentResult(
+                action='VERIFY',
+                outcome='VERIFIED',
+                email=email,
+                verified=True,
+                source='ssm',
+                inputs_present={'email': True}
+            )
+
+        # risky — passes but flagged (verified=False so CSV shows it)
+        if status == 'risky':
+            return EnrichmentResult(
+                action='VERIFY',
+                outcome='VERIFIED',
+                email=email,
+                verified=False,
+                source='ssm',
+                inputs_present={'email': True}
+            )
+
+        # invalid / INVALID → dead address
+        if status == 'invalid' or verdict == 'INVALID':
+            return EnrichmentResult(
+                action='VERIFY',
+                outcome='INVALID',
+                email=email,
+                verified=False,
+                source='ssm',
+                inputs_present={'email': True}
+            )
+
+        # unknown / no status → can't determine, don't block
+        return None
+
+    except requests.exceptions.Timeout:
+        return None
+    except Exception:
+        return None
+
+
 def enrich_with_ssm(
     record: NormalizedRecord,
     api_key: str,
-    timeout_ms: int = 30000
+    timeout_ms: int = 18000
 ) -> Optional[EnrichmentResult]:
     """
-    Enrich record using Connector Agent API (SSM member access).
+    Find email using Connector Agent API (SSM member access).
 
     SSM membership required — get your API key at:
     https://www.skool.com/ssmasters
@@ -77,6 +272,14 @@ def enrich_with_ssm(
                 inputs_present={'domain': True, 'person_name': True}
             )
 
+        if response.status_code == 429:
+            return EnrichmentResult(
+                action='FIND_PERSON',
+                outcome='RATE_LIMITED',
+                source='ssm',
+                inputs_present={'domain': True, 'person_name': True}
+            )
+
         if response.status_code != 200:
             return EnrichmentResult(
                 action='FIND_PERSON',
@@ -108,6 +311,8 @@ def enrich_with_ssm(
             inputs_present={'domain': True, 'person_name': True}
         )
 
+    except requests.exceptions.Timeout:
+        return None
     except Exception:
         return None
 
@@ -118,21 +323,20 @@ def enrich_with_apollo(
     timeout_ms: int = 30000
 ) -> Optional[EnrichmentResult]:
     """
-    Enrich record using Apollo API.
+    Find email using Apollo API.
 
-    Apollo can search by domain OR company.
+    Scores all candidates by title seniority and picks the best match
+    rather than blindly taking the first result.
+
+    Apollo can search by domain OR company name.
     """
     if not api_key:
         return None
 
-    # Build request payload
-    payload: Dict[str, Any] = {}
+    has_domain = bool(record.domain)
+    has_company = bool(record.company)
 
-    if record.domain:
-        payload['domain'] = record.domain
-    elif record.company:
-        payload['organization_name'] = record.company
-    else:
+    if not has_domain and not has_company:
         return EnrichmentResult(
             action='FIND_PERSON',
             outcome='MISSING_INPUT',
@@ -140,9 +344,19 @@ def enrich_with_apollo(
             inputs_present={'domain': False, 'company': False}
         )
 
-    # Add person filters if available
-    if record.first_name or record.full_name:
-        payload['person_titles'] = [record.title] if record.title else []
+    payload: Dict[str, Any] = {
+        'contact_email_status': ['verified', 'likely to engage'],
+    }
+
+    if has_domain:
+        payload['q_organization_domains_list'] = [record.domain]
+    else:
+        payload['q_keywords'] = record.company
+
+    # Seniority filter: prefer senior people
+    payload['person_seniorities'] = [
+        'founder', 'c_suite', 'owner', 'partner', 'vp', 'director', 'manager'
+    ]
 
     try:
         response = requests.post(
@@ -160,7 +374,23 @@ def enrich_with_apollo(
                 action='FIND_PERSON',
                 outcome='AUTH_ERROR',
                 source='apollo',
-                inputs_present={'domain': bool(record.domain), 'company': bool(record.company)}
+                inputs_present={'domain': has_domain, 'company': has_company}
+            )
+
+        if response.status_code == 422:
+            return EnrichmentResult(
+                action='FIND_PERSON',
+                outcome='CREDITS_EXHAUSTED',
+                source='apollo',
+                inputs_present={'domain': has_domain, 'company': has_company}
+            )
+
+        if response.status_code == 429:
+            return EnrichmentResult(
+                action='FIND_PERSON',
+                outcome='RATE_LIMITED',
+                source='apollo',
+                inputs_present={'domain': has_domain, 'company': has_company}
             )
 
         if response.status_code != 200:
@@ -168,7 +398,7 @@ def enrich_with_apollo(
                 action='FIND_PERSON',
                 outcome='NOT_FOUND',
                 source='apollo',
-                inputs_present={'domain': bool(record.domain), 'company': bool(record.company)}
+                inputs_present={'domain': has_domain, 'company': has_company}
             )
 
         data = response.json()
@@ -179,19 +409,27 @@ def enrich_with_apollo(
                 action='FIND_PERSON',
                 outcome='NO_CANDIDATES',
                 source='apollo',
-                inputs_present={'domain': bool(record.domain), 'company': bool(record.company)}
+                inputs_present={'domain': has_domain, 'company': has_company}
             )
 
-        # Get first person
-        person = people[0]
-        email = person.get('email')
+        # Rank by seniority — pick the most senior person with an email
+        scored = sorted(people, key=_score_person, reverse=True)
 
-        if not email:
+        person = None
+        email = None
+        for candidate in scored:
+            candidate_email = candidate.get('email')
+            if candidate_email:
+                person = candidate
+                email = candidate_email
+                break
+
+        if not email or not person:
             return EnrichmentResult(
                 action='FIND_PERSON',
                 outcome='NO_CANDIDATES',
                 source='apollo',
-                inputs_present={'domain': bool(record.domain), 'company': bool(record.company)}
+                inputs_present={'domain': has_domain, 'company': has_company}
             )
 
         return EnrichmentResult(
@@ -203,17 +441,18 @@ def enrich_with_apollo(
             title=person.get('title', ''),
             verified=True,
             source='apollo',
-            inputs_present={'domain': bool(record.domain), 'company': bool(record.company)}
+            inputs_present={'domain': has_domain, 'company': has_company}
         )
 
-    except Exception as e:
-        # Log error silently - enrichment failures are expected and handled
+    except requests.exceptions.Timeout:
         return EnrichmentResult(
             action='FIND_PERSON',
             outcome='TIMEOUT',
             source='apollo',
-            inputs_present={'domain': bool(record.domain), 'company': bool(record.company)}
+            inputs_present={'domain': has_domain, 'company': has_company}
         )
+    except Exception:
+        return None
 
 
 def enrich_with_anymail(
@@ -222,7 +461,7 @@ def enrich_with_anymail(
     timeout_ms: int = 30000
 ) -> Optional[EnrichmentResult]:
     """
-    Enrich record using Anymail Finder API.
+    Find email using Anymail Finder API.
 
     Anymail requires domain + name.
     """
@@ -237,7 +476,6 @@ def enrich_with_anymail(
             inputs_present={'domain': bool(record.domain), 'person_name': False}
         )
 
-    # Build request
     first_name = record.first_name or record.full_name.split()[0]
     last_name = record.last_name or (record.full_name.split()[1] if len(record.full_name.split()) > 1 else '')
 
@@ -257,6 +495,14 @@ def enrich_with_anymail(
             return EnrichmentResult(
                 action='FIND_PERSON',
                 outcome='AUTH_ERROR',
+                source='anymail',
+                inputs_present={'domain': True, 'person_name': True}
+            )
+
+        if response.status_code == 429:
+            return EnrichmentResult(
+                action='FIND_PERSON',
+                outcome='RATE_LIMITED',
                 source='anymail',
                 inputs_present={'domain': True, 'person_name': True}
             )
@@ -292,9 +538,39 @@ def enrich_with_anymail(
             inputs_present={'domain': True, 'person_name': True}
         )
 
-    except Exception as e:
-        # Silently fail on network/API errors
+    except requests.exceptions.Timeout:
         return None
+    except Exception:
+        return None
+
+
+# =============================================================================
+# PROVIDER WATERFALL — ordered by action type
+# Port of connector-os router priority matrix
+# =============================================================================
+
+def _get_find_providers(config: EnrichmentConfig, action: str):
+    """
+    Return ordered list of (name, func, api_key) for a given action.
+
+    Priority per action:
+      FIND_PERSON:          anymail → ssm → apollo
+      FIND_COMPANY_CONTACT: apollo  → anymail
+      SEARCH_PERSON:        anymail → apollo
+      SEARCH_COMPANY:       apollo  → anymail
+    """
+    anymail = ('anymail', enrich_with_anymail, config.anymail_api_key)
+    apollo  = ('apollo',  enrich_with_apollo,  config.apollo_api_key)
+    ssm     = ('ssm',     enrich_with_ssm,     config.ssm_api_key)
+
+    if action == 'FIND_PERSON':
+        return [anymail, ssm, apollo]
+    elif action == 'FIND_COMPANY_CONTACT':
+        return [apollo, anymail]
+    elif action == 'SEARCH_PERSON':
+        return [anymail, apollo]
+    else:  # SEARCH_COMPANY
+        return [apollo, anymail]
 
 
 # =============================================================================
@@ -309,16 +585,22 @@ def enrich_record(
     Enrich a single record.
 
     FLOW:
-    1. If email exists, return immediately (trust user data)
-    2. Check cache for previous enrichment
-    3. Waterfall through providers: Apollo → Anymail → SSM
-    4. Store successful results in cache
-    5. Return first successful enrichment
-
-    Returns EnrichmentResult with action and outcome.
+    1. Classify inputs → determine action (VERIFY / FIND_PERSON / etc.)
+    2. VERIFY: existing email → call SSM verify endpoint → VERIFIED / INVALID
+    3. FIND: check cache first (90-day TTL)
+    4. FIND: waterfall through providers in priority order for this action
+    5. Cache successful results
     """
-    # If email already exists, trust it
-    if record.email:
+    action = classify_inputs(record)
+
+    # ── VERIFY: email already present — check if it's actually live ────────────
+    if action == 'VERIFY':
+        if config.ssm_api_key:
+            verify_result = verify_with_ssm(record.email, config.ssm_api_key)
+            if verify_result:
+                return verify_result
+
+        # No verify key configured or verify returned None (unknown) — trust it
         return EnrichmentResult(
             action='VERIFY',
             outcome='ENRICHED',
@@ -331,10 +613,25 @@ def enrich_record(
             inputs_present={'email': True}
         )
 
-    # Check cache first (90-day TTL)
-    cached_result = check_cache(record)
+    # ── CANNOT_ROUTE: nothing to work with ────────────────────────────────────
+    if action == 'CANNOT_ROUTE':
+        return EnrichmentResult(
+            action='CANNOT_ROUTE',
+            outcome='MISSING_INPUT',
+            source='none',
+            inputs_present={
+                'email': False,
+                'domain': bool(record.domain),
+                'company': bool(record.company),
+                'person_name': bool(record.first_name or record.full_name),
+            }
+        )
+
+    # ── FIND: check cache first ────────────────────────────────────────────────
+    with _cache_lock:
+        cached_result = check_cache(record)
+
     if cached_result:
-        # Update record with cached data
         record.email = cached_result.email
         if cached_result.first_name:
             record.first_name = cached_result.first_name
@@ -344,12 +641,8 @@ def enrich_record(
             record.title = cached_result.title
         return cached_result
 
-    # Try providers in order
-    providers = [
-        ('apollo', enrich_with_apollo, config.apollo_api_key),
-        ('anymail', enrich_with_anymail, config.anymail_api_key),
-        ('ssm', enrich_with_ssm, config.ssm_api_key),
-    ]
+    # ── FIND: waterfall through providers ─────────────────────────────────────
+    providers = _get_find_providers(config, action)
 
     for provider_name, provider_func, api_key in providers:
         if not api_key:
@@ -358,7 +651,6 @@ def enrich_record(
         result = provider_func(record, api_key, config.timeout_ms)
 
         if result and result.outcome == 'ENRICHED':
-            # Update record with enriched data
             record.email = result.email
             if result.first_name:
                 record.first_name = result.first_name
@@ -367,14 +659,17 @@ def enrich_record(
             if result.title:
                 record.title = result.title
 
-            # Store in cache for future use
-            store_in_cache(record, result)
+            with _cache_lock:
+                store_in_cache(record, result)
 
             return result
 
-    # No provider succeeded
+        # Stop cascading on auth/credit errors — no point trying same provider again
+        if result and result.outcome in ('AUTH_ERROR', 'CREDITS_EXHAUSTED'):
+            break
+
     return EnrichmentResult(
-        action='FIND_PERSON',
+        action=action,
         outcome='NOT_FOUND',
         source='none',
         inputs_present={
@@ -391,17 +686,28 @@ def enrich_batch(
     on_progress: Optional[callable] = None
 ) -> Dict[str, EnrichmentResult]:
     """
-    Enrich multiple records.
+    Enrich multiple records in parallel (max 3 concurrent API calls).
 
     Returns dict mapping record_key → EnrichmentResult
     """
-    results = {}
+    results: Dict[str, EnrichmentResult] = {}
+    completed = 0
+    progress_lock = threading.Lock()
+    total = len(records)
 
-    for i, record in enumerate(records):
-        result = enrich_record(record, config)
-        results[record.record_key] = result
+    def _enrich_one(record: NormalizedRecord):
+        return record.record_key, enrich_record(record, config)
 
-        if on_progress:
-            on_progress(i + 1, len(records))
+    with ThreadPoolExecutor(max_workers=3) as executor:
+        futures = {executor.submit(_enrich_one, record): record for record in records}
+
+        for future in as_completed(futures):
+            record_key, result = future.result()
+            results[record_key] = result
+
+            if on_progress:
+                with progress_lock:
+                    completed += 1
+                    on_progress(completed, total)
 
     return results
