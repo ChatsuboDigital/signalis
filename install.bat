@@ -119,15 +119,19 @@ call venv\Scripts\activate.bat
 
 python -m pip install --upgrade pip --quiet --disable-pip-version-check
 
-REM Run pip install without --quiet so errors are visible if it fails
-python -m pip install -e ".[all]" --disable-pip-version-check
+REM Capture pip output — show only on failure so normal runs stay clean
+python -m pip install -e ".[all]" --disable-pip-version-check > "%TEMP%\signalis_pip.log" 2>&1
 if %errorlevel% neq 0 (
     echo.
-    echo  [!!] Dependency installation failed. See output above.
+    echo  [!!] Dependency installation failed:
+    echo.
+    type "%TEMP%\signalis_pip.log"
+    del /q "%TEMP%\signalis_pip.log" >nul 2>nul
     echo.
     pause
     exit /b 1
 )
+del /q "%TEMP%\signalis_pip.log" >nul 2>nul
 
 echo  [OK] Installed (Shaper + Connector -- full install).
 echo.
@@ -153,7 +157,20 @@ for /f "tokens=2*" %%a in ('reg query "HKCU\Environment" /v Path 2^>nul') do set
 echo !USER_PATH! | find /i "%VENV_SCRIPTS%" >nul 2>nul
 if %errorlevel% neq 0 (
     if defined USER_PATH (
-        setx PATH "%VENV_SCRIPTS%;!USER_PATH!" >nul
+        REM setx has a 1024-character limit — use PowerShell to set PATH safely
+        powershell -Command "[System.Environment]::SetEnvironmentVariable('Path', '%VENV_SCRIPTS%;' + [System.Environment]::GetEnvironmentVariable('Path', 'User'), 'User')" >nul 2>nul
+        if !errorlevel! neq 0 (
+            REM PowerShell unavailable — fall back to setx
+            setx PATH "%VENV_SCRIPTS%;!USER_PATH!" >nul 2>nul
+            if !errorlevel! neq 0 (
+                echo  [!!] Could not update PATH automatically.
+                echo       Add this folder to your PATH manually:
+                echo       %VENV_SCRIPTS%
+                echo.
+                echo       Or use install.ps1 ^(PowerShell^) instead.
+                goto :path_done
+            )
+        )
     ) else (
         setx PATH "%VENV_SCRIPTS%" >nul
     )
@@ -162,6 +179,7 @@ if %errorlevel% neq 0 (
 ) else (
     echo  [OK] Already in PATH.
 )
+:path_done
 echo.
 
 REM ── [4/4] Configuration ─────────────────────────────────────────────────────

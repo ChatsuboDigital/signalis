@@ -94,13 +94,34 @@ if [ -d "$VENV_DIR" ]; then
     if ! "$VENV_DIR/bin/python" --version &>/dev/null; then
         warn "Existing venv is broken — recreating..."
         rm -rf "$VENV_DIR"
-        "$PYTHON_CMD" -m venv "$VENV_DIR" || die "Failed to create virtual environment."
+        if ! "$PYTHON_CMD" -m venv "$VENV_DIR" 2>/dev/null; then
+            echo ""
+            fail "Failed to recreate virtual environment."
+            if [[ "${OSTYPE:-}" != "darwin"* ]]; then
+                echo -e "  Try: ${CYAN}sudo apt install python3-venv${NC}"
+            fi
+            echo ""
+            exit 1
+        fi
         info "Recreated virtual environment"
     else
         warn "Existing venv found — reusing (run 'rm -rf venv' to start fresh)"
     fi
 else
-    "$PYTHON_CMD" -m venv "$VENV_DIR" || die "Failed to create virtual environment."
+    if ! "$PYTHON_CMD" -m venv "$VENV_DIR" 2>/dev/null; then
+        echo ""
+        fail "Failed to create virtual environment."
+        echo ""
+        if [[ "${OSTYPE:-}" != "darwin"* ]]; then
+            echo -e "  On Debian/Ubuntu, install the venv module first:"
+            echo -e "    ${CYAN}sudo apt install python3-venv${NC}"
+            echo ""
+            echo -e "  On Fedora/RHEL:"
+            echo -e "    ${CYAN}sudo dnf install python3-devel${NC}"
+            echo ""
+        fi
+        exit 1
+    fi
     info "Created virtual environment"
 fi
 
