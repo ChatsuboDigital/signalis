@@ -35,6 +35,58 @@ class EnrichmentConfig:
 # Thread-safe lock for cache reads/writes
 _cache_lock = threading.Lock()
 
+# In-memory cache: domain → bool (True = Microsoft 365 tenant)
+_ms365_cache: Dict[str, bool] = {}
+_ms365_lock = threading.Lock()
+
+
+# =============================================================================
+# MICROSOFT 365 TENANT DETECTION
+# =============================================================================
+
+def _detect_ms365(domain: str, timeout_s: float = 5.0) -> bool:
+    """
+    Detect if a domain is hosted on Microsoft 365 / Exchange Online.
+
+    Uses Microsoft's public OpenID configuration endpoint — no auth required,
+    no external libraries needed (just requests).
+
+    M365 domains respond 200 with a tenant issuer URL.
+    Non-M365 domains respond 400 (unknown tenant).
+
+    WHY THIS MATTERS:
+    Microsoft 365 / Exchange Online domains are notorious catch-all domains.
+    SMTP verification returns 250 OK for ANY address on these domains, whether
+    or not the mailbox exists. This causes verification tools to mark all M365
+    emails as "valid" — which is false. Emails to non-existent M365 addresses
+    still bounce, hurting sender reputation and deliverability.
+
+    By detecting M365 tenants we can correctly mark those emails as
+    verified=False (risky / unverifiable via SMTP) instead of falsely claiming
+    they're deliverable.
+
+    Results are cached per domain for the lifetime of the process.
+    """
+    with _ms365_lock:
+        if domain in _ms365_cache:
+            return _ms365_cache[domain]
+
+    is_ms365 = False
+    try:
+        resp = requests.get(
+            f'https://login.microsoftonline.com/{domain}/.well-known/openid-configuration',
+            timeout=timeout_s,
+            allow_redirects=False,
+        )
+        is_ms365 = resp.status_code == 200
+    except Exception:
+        pass  # Network error or timeout — assume not M365, don't block
+
+    with _ms365_lock:
+        _ms365_cache[domain] = is_ms365
+
+    return is_ms365
+
 
 # =============================================================================
 # SENIORITY RANKING — Apollo candidate scoring
@@ -178,6 +230,38 @@ def verify_with_ssm(
         data = response.json()
         status = (data.get('status') or '').lower()
         verdict = (data.get('verdict') or '').upper()
+
+        # Catch-all / Microsoft 365 signals from SSM response
+        # SSM may return these fields when it detects catch-all or M365 tenants
+        hosted_at = (
+            data.get('hosted_at') or
+            data.get('hostedAt') or
+            data.get('provider') or ''
+        ).lower()
+        is_catch_all = bool(
+            data.get('catch_all') or
+            data.get('catchAll') or
+            data.get('is_catch_all') or
+            data.get('isCatchAll')
+        )
+        is_ms365_hosted = any(k in hosted_at for k in ('microsoft', 'outlook', 'exchange'))
+
+        # SSM explicitly detected catch-all or Microsoft-hosted domain →
+        # downgrade to risky regardless of status field. Catch-all domains
+        # return 250 OK for any address, so "valid" from SMTP means nothing.
+        if is_catch_all or is_ms365_hosted:
+            return EnrichmentResult(
+                action='VERIFY',
+                outcome='VERIFIED',
+                email=email,
+                verified=False,  # Risky — catch-all / M365 tenant
+                source='ssm',
+                inputs_present={'email': True},
+                provider_results={
+                    'catch_all': True,
+                    'hosted_at': hosted_at or 'microsoft',
+                }
+            )
 
         # valid / VALID → confirmed live
         if status == 'valid' or verdict == 'VALID':
@@ -599,8 +683,30 @@ def enrich_record(
             verify_result = verify_with_ssm(record.email, config.ssm_api_key)
             if verify_result:
                 return verify_result
+            # SSM returned None (unknown/timeout) — fall through to M365 check
 
-        # No verify key configured or verify returned None (unknown) — trust it
+        # No verify key OR SSM returned unknown — detect Microsoft 365 tenants.
+        # M365 / Exchange Online domains are catch-all: SMTP says 250 OK for
+        # ANY address, so we cannot safely claim the email is deliverable.
+        # Mark as verified=False so senders treat it as risky rather than safe.
+        email_domain = record.email.split('@')[-1] if record.email and '@' in record.email else ''
+        check_domain = email_domain or record.domain or ''
+
+        if check_domain and _detect_ms365(check_domain):
+            return EnrichmentResult(
+                action='VERIFY',
+                outcome='ENRICHED',
+                email=record.email,
+                first_name=record.first_name,
+                last_name=record.last_name,
+                title=record.title or '',
+                verified=False,  # M365 catch-all — SMTP verification is unreliable
+                source='ms365_catchall',
+                inputs_present={'email': True},
+                provider_results={'catch_all': True, 'hosted_at': 'microsoft'}
+            )
+
+        # Not M365, no SSM key (or SSM unknown) — trust the existing email
         return EnrichmentResult(
             action='VERIFY',
             outcome='ENRICHED',
